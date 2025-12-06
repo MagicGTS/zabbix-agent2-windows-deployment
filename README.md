@@ -321,7 +321,6 @@ Common causes: Invalid server address, firewall blocking, incorrect PSK
 
 ## 📚 Additional Documentation
 
-- **[ZABBIX-AUTO-DISCOVERY.md](ZABBIX-AUTO-DISCOVERY.md)** - Complete guide for auto-registration setup
 - **[Zabbix Official Documentation](https://www.zabbix.com/documentation/current/manual/appendix/config/zabbix_agent2)** - Agent 2 configuration reference
 
 ---
@@ -341,4 +340,5 @@ Common causes: Invalid server address, firewall blocking, incorrect PSK
 ---
 
 **⭐ If you find this useful, please star this repository!**
+
 
