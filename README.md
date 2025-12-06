@@ -3,6 +3,7 @@
 **Automated installation and configuration management for Zabbix Agent 2 on Windows**
 
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1+-blue.svg)](https://github.com/PowerShell/PowerShell)
+[![Version](https://img.shields.io/badge/Version-1.1.0-brightgreen.svg)](https://github.com/MagicGTS/zabbix-agent2-windows-deployment)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey.svg)](https://www.microsoft.com/windows)
 
@@ -13,13 +14,15 @@ This PowerShell script automates the deployment and update management of Zabbix 
 ### Key Features
 
 - ✅ **Intelligent Version Detection** - Automatically extracts version from MSI filename and detects installed version via executable
-- ✅ **Smart Update Logic** - Only updates when agent or config version changes
+- ✅ **Smart Update Logic** - Differentiates between full reinstall (version change) and configuration update (config/PSK change)
+- ✅ **PSK Key Change Detection** - Automatically detects and updates PSK keys without reinstalling the agent
 - ✅ **Centralized Management** - Deploy from network share with single configuration source
 - ✅ **Secure PSK Deployment** - Automated PSK key file creation with proper ACL permissions
 - ✅ **Auto-Registration Support** - Pre-configured for Zabbix auto-registration with hostname detection
 - ✅ **Service Management** - Handles service stop/start with health verification
 - ✅ **Detailed Logging** - Comprehensive step-by-step execution logging
 - ✅ **Error Handling** - Robust error handling with cleanup in finally block
+- ✅ **Version Information** - Built-in version command for script management
 
 ---
 
@@ -31,6 +34,12 @@ This PowerShell script automates the deployment and update management of Zabbix 
 - PowerShell 5.1 or higher
 - Administrator privileges
 - Network share with installation files
+
+### Check Script Version
+
+```powershell
+.\Install-ZabbixAgent2.ps1 -Version
+```
 
 ### Basic Usage
 
@@ -50,10 +59,9 @@ This PowerShell script automates the deployment and update management of Zabbix 
 
 ```
 .
-├── Install-ZabbixAgent2.ps1    # Main installation script
+├── Install-ZabbixAgent2.ps1    # Main installation script (v1.1.0)
 ├── zabbix_agent2.conf          # Example agent configuration
-├── README.md                   # This file
-└── ZABBIX-AUTO-DISCOVERY.md    # Auto-discovery documentation
+└── README.md                   # This file
 ```
 
 ---
@@ -62,7 +70,7 @@ This PowerShell script automates the deployment and update management of Zabbix 
 
 ### Version Detection System
 
-The script uses a **two-tier version checking system**:
+The script uses a **three-tier version checking system**:
 
 1. **Agent Version** - Extracted from:
    - MSI filename pattern: `zabbix_agent2-X.Y.Z-windows-amd64-openssl.msi`
@@ -74,6 +82,24 @@ The script uses a **two-tier version checking system**:
    # Config Version: 1.0
    ```
 
+3. **PSK Key** - Read from `psk.key` file (first line)
+   - Compared case-insensitively (hex strings)
+   - Triggers service restart if changed
+
+### Update Logic
+
+The script uses **intelligent update logic**:
+
+- **Full Reinstall** - Triggered when:
+  - Agent version changes
+  - Agent not installed
+  - Force flag used
+
+- **Configuration Update** - Triggered when:
+  - Config version changes
+  - PSK key changes
+  - Only stops service → updates files → starts service
+
 ### Installation Flow
 
 ```
@@ -83,40 +109,42 @@ Mount Network Share as PSDrive
   ↓
 Extract Version from MSI Filename
   ↓
-Get Installed Agent Version
+Check Installed Agent Version
   ↓
-Get Config Version from File
+Check Config Version
   ↓
-Versions Match? → Yes → Skip Installation → End
+Check PSK Key
+  ↓
+Version Changed? → Yes → Full Reinstall → End
   ↓ No
-Stop Zabbix Service
-  ↓
-Install/Update MSI
-  ↓
-Copy Configuration
-  ↓
-Create PSK Key File
-  ↓
-Start Service
-  ↓
-Verify Health
-  ↓
-Cleanup PSDrive
-  ↓
-End
+Config/PSK Changed? → Yes → Update Config/PSK → Restart Service → End
+  ↓ No
+All Up to Date → End
 ```
 
 ### Execution Steps
 
+**Full Reinstall Mode (Agent Version Changed):**
 1. **Mount Network Share** - Creates temporary PSDrive for reliable network access
 2. **Version Extraction** - Parses MSI filename to get target version
-3. **Update Check** - Compares installed vs. target versions (agent + config)
-4. **Installation** - Executes MSI with silent parameters if update needed
-5. **Configuration** - Copies config file as-is (no modifications)
-6. **PSK Deployment** - Creates PSK key file with secure ACL permissions
-7. **Service Start** - Starts agent service and verifies status
-8. **Health Check** - Scans log file for errors
-9. **Cleanup** - Removes temporary PSDrive
+3. **Update Check** - Detects agent version mismatch
+4. **Stop Service** - Stops Zabbix Agent 2 service
+5. **Installation** - Executes MSI with silent parameters
+6. **Configuration** - Copies config file from network share
+7. **PSK Deployment** - Creates PSK key file with secure ACL permissions
+8. **Service Start** - Starts agent service and verifies status
+9. **Health Check** - Scans log file for errors
+10. **Cleanup** - Removes temporary PSDrive
+
+**Configuration Update Mode (Config/PSK Changed):**
+1. **Mount Network Share** - Creates temporary PSDrive
+2. **Version Check** - Agent version matches, config/PSK differs
+3. **Stop Service** - Stops Zabbix Agent 2 service
+4. **Update Config** - Copies updated configuration file
+5. **Update PSK** - Updates PSK key file
+6. **Service Start** - Restarts agent service
+7. **Health Check** - Verifies service is running
+8. **Cleanup** - Removes temporary PSDrive
 
 ---
 
@@ -131,6 +159,7 @@ End
 | `MSIFileName` | ✅ Yes | MSI filename with version | `zabbix_agent2-7.4.5-windows-amd64-openssl.msi` |
 | `ConfigVersion` | ✅ Yes | Config version identifier | `1.0` |
 | `Force` | ❌ No | Force reinstallation | `-Force` |
+| `Version` | ❌ No | Display script version | `-Version` |
 
 ---
 
@@ -212,8 +241,6 @@ EnablePersistentBuffer=1
 PersistentBufferPeriod=1h
 PersistentBufferFile=C:\Program Files\Zabbix Agent 2\PersistentBuffer.sqlite3
 ```
-
-See [ZABBIX-AUTO-DISCOVERY.md](ZABBIX-AUTO-DISCOVERY.md) for detailed auto-registration setup.
 
 ---
 
@@ -327,7 +354,7 @@ Common causes: Invalid server address, firewall blocking, incorrect PSK
 
 ## 📝 Changelog
 
-### Version 1.0 (2025-12-06)
+### Version 1.0.0 (2025-12-06)
 - Initial release
 - Automated installation from network share
 - Version detection from MSI filename and executable

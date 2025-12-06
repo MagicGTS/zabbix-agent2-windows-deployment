@@ -18,10 +18,10 @@
     Example: \\server\share\zabbix
 
 .PARAMETER Server
-    Zabbix Server or Proxy address for passive checks.
+    Zabbix Server or Proxy address for passive checks (optional, used only during MSI installation).
 
 .PARAMETER ServerActive
-    Zabbix Server or Proxy address for active checks.
+    Zabbix Server or Proxy address for active checks (optional, used only during MSI installation).
 
 .PARAMETER PSKKey
     Pre-shared key content (256-bit hex string, 64 characters).
@@ -36,20 +36,30 @@
     Force reinstallation even if versions match.
 
 .EXAMPLE
-    .\Install-ZabbixAgent2.ps1 -NetworkShare "\\fileserver\zabbix" -Server "zbx-poll.contoso.com" -ServerActive "zbx-push.contoso.com" -PSKKey "0123456789abcdef..." -MSIFileName "zabbix_agent2-7.4.5-windows-amd64-openssl.msi" -ConfigVersion "1.0"
+    .\Install-ZabbixAgent2.ps1 -NetworkShare "\\fileserver\zabbix" -PSKKey "0123456789abcdef..." -MSIFileName "zabbix_agent2-7.4.5-windows-amd64-openssl.msi" -ConfigVersion "1.0"
 
 .EXAMPLE
-    .\Install-ZabbixAgent2.ps1 -NetworkShare "\\fileserver\zabbix" -Server "zbx-poll.contoso.com" -ServerActive "zbx-push.contoso.com" -PSKKey "0123456789abcdef..." -MSIFileName "zabbix_agent2-7.4.5-windows-amd64-openssl.msi" -ConfigVersion "1.0" -Force
+    .\Install-ZabbixAgent2.ps1 -NetworkShare "\\fileserver\zabbix" -PSKKey "0123456789abcdef..." -MSIFileName "zabbix_agent2-7.4.5-windows-amd64-openssl.msi" -ConfigVersion "1.0" -Force
+
+.EXAMPLE
+    .\Install-ZabbixAgent2.ps1 -Version
+    Display script version information.
 
 .NOTES
-    Author: GitHub Copilot
-    Version: 1.0
+    Author: Andrew L. (magicgts@gmail.com)
+    Version: 1.0.0
     Requires: PowerShell 5.1+, Administrator privileges
+    
+    Version History:
+    1.0.0 - Initial release
 #>
 
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [Parameter(Mandatory=$true, HelpMessage="UNC path to network share with installation files")]
+    [Parameter(Mandatory=$false, ParameterSetName="Version", HelpMessage="Display script version")]
+    [switch]$Version,
+
+    [Parameter(Mandatory=$true, ParameterSetName="Install", HelpMessage="UNC path to network share with installation files")]
     [ValidateScript({
         if (-not (Test-Path $_ -PathType Container)) {
             throw "Network share path does not exist: $_"
@@ -58,29 +68,42 @@ param(
     })]
     [string]$NetworkShare,
 
-    [Parameter(Mandatory=$true, HelpMessage="Zabbix Server/Proxy address for passive checks")]
-    [ValidateNotNullOrEmpty()]
-    [string]$Server,
+    [Parameter(Mandatory=$false, ParameterSetName="Install", HelpMessage="Zabbix Server/Proxy address for passive checks")]
+    [string]$Server = "127.0.0.1",
 
-    [Parameter(Mandatory=$true, HelpMessage="Zabbix Server/Proxy address for active checks")]
-    [ValidateNotNullOrEmpty()]
-    [string]$ServerActive,
+    [Parameter(Mandatory=$false, ParameterSetName="Install", HelpMessage="Zabbix Server/Proxy address for active checks")]
+    [string]$ServerActive = "127.0.0.1",
 
-    [Parameter(Mandatory=$true, HelpMessage="PSK key content (64 hex characters)")]
+    [Parameter(Mandatory=$true, ParameterSetName="Install", HelpMessage="PSK key content (64 hex characters)")]
     [ValidatePattern('^[0-9a-fA-F]{64}$')]
     [string]$PSKKey,
 
-    [Parameter(Mandatory=$true, HelpMessage="MSI filename (e.g., zabbix_agent2-7.4.5-windows-amd64-openssl.msi)")]
+    [Parameter(Mandatory=$true, ParameterSetName="Install", HelpMessage="MSI filename (e.g., zabbix_agent2-7.4.5-windows-amd64-openssl.msi)")]
     [ValidatePattern('^zabbix_agent2-\d+\.\d+\.\d+-windows-amd64-openssl\.msi$')]
     [string]$MSIFileName,
 
-    [Parameter(Mandatory=$true, HelpMessage="Configuration version for tracking")]
+    [Parameter(Mandatory=$true, ParameterSetName="Install", HelpMessage="Configuration version for tracking")]
     [ValidateNotNullOrEmpty()]
     [string]$ConfigVersion,
 
-    [Parameter(Mandatory=$false, HelpMessage="Force reinstallation")]
+    [Parameter(Mandatory=$false, ParameterSetName="Install", HelpMessage="Force reinstallation")]
     [switch]$Force
 )
+
+# Script version
+$script:ScriptVersion = "1.0.0"
+$script:ScriptName = "Zabbix Agent 2 Installation Script"
+
+# Handle -Version parameter
+if ($Version) {
+    Write-Host "$script:ScriptName" -ForegroundColor Cyan
+    Write-Host "Version: $script:ScriptVersion" -ForegroundColor Green
+    Write-Host "Author: Andrew L. (magicgts@gmail.com)" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "Version History:" -ForegroundColor Yellow
+    Write-Host "  1.0.0 - Initial release" -ForegroundColor Gray
+    exit 0
+}
 
 # Configuration
 $script:InstallPath = "C:\Program Files\Zabbix Agent 2"
@@ -192,22 +215,67 @@ function Get-InstalledConfigVersion {
     }
 }
 
+function Get-InstalledPSKKey {
+    <#
+    .SYNOPSIS
+        Gets PSK key content from psk.key file (first line only).
+    #>
+    try {
+        if (-not (Test-Path $script:PSKFile)) {
+            Write-Log "PSK key file not found - agent not configured" -Level Warning
+            return $null
+        }
+
+        # Read only the first line from the file
+        $keyContent = Get-Content $script:PSKFile -First 1 -ErrorAction Stop
+        
+        # Remove any whitespace
+        if ($null -ne $keyContent) {
+            $keyContent = $keyContent.Trim()
+        }
+        
+        return $keyContent
+    }
+    catch {
+        Write-Log "Error reading PSK key file: $_" -Level Error
+        return $null
+    }
+}
+
 function Test-UpdateRequired {
     <#
     .SYNOPSIS
         Checks if installation or update is required.
+    .OUTPUTS
+        Returns PSCustomObject with:
+        - RequiresReinstall: $true if agent version changed
+        - RequiresRestart: $true if config or PSK changed (or if reinstalling)
+        - NoAction: $true if everything is up to date
     #>
     param(
         [Parameter(Mandatory=$true)]
         [string]$TargetAgentVersion,
         
         [Parameter(Mandatory=$true)]
-        [string]$TargetConfigVersion
+        [string]$TargetConfigVersion,
+        
+        [Parameter(Mandatory=$true)]
+        [string]$TargetPSKKey
     )
+
+    $result = [PSCustomObject]@{
+        RequiresReinstall = $false
+        RequiresRestart = $false
+        NoAction = $false
+        ConfigChanged = $false
+        PSKChanged = $false
+    }
 
     if ($Force) {
         Write-Log "Force flag set - reinstallation required" -Level Warning
-        return $true
+        $result.RequiresReinstall = $true
+        $result.RequiresRestart = $true
+        return $result
     }
 
     # Get installed agent version from executable
@@ -215,30 +283,63 @@ function Test-UpdateRequired {
     
     if ($null -eq $installedAgentVersion) {
         Write-Log "Agent not installed - installation required" -Level Info
-        return $true
+        $result.RequiresReinstall = $true
+        $result.RequiresRestart = $true
+        return $result
     }
 
     # Get config version from config file
     $installedConfigVersion = Get-InstalledConfigVersion
     
     if ($null -eq $installedConfigVersion) {
-        Write-Log "Config version not found - update required" -Level Warning
-        return $true
+        Write-Log "Config version not found - configuration update required" -Level Warning
+        $result.ConfigChanged = $true
+        $result.RequiresRestart = $true
     }
 
-    # Compare versions
+    # Get installed PSK key
+    $installedPSKKey = Get-InstalledPSKKey
+    
+    if ($null -eq $installedPSKKey) {
+        Write-Log "PSK key not found - key update required" -Level Warning
+        $result.PSKChanged = $true
+        $result.RequiresRestart = $true
+    }
+
+    # Check agent version - requires reinstall
     if ($installedAgentVersion -ne $TargetAgentVersion) {
-        Write-Log "Agent version mismatch (current: $installedAgentVersion, target: $TargetAgentVersion) - update required" -Level Warning
-        return $true
+        Write-Log "Agent version mismatch (current: $installedAgentVersion, target: $TargetAgentVersion) - reinstallation required" -Level Warning
+        $result.RequiresReinstall = $true
+        $result.RequiresRestart = $true
+        return $result
     }
 
-    if ($installedConfigVersion -ne $TargetConfigVersion) {
-        Write-Log "Config version mismatch (current: $installedConfigVersion, target: $TargetConfigVersion) - update required" -Level Warning
-        return $true
+    # Check config version - requires restart only
+    if ($null -ne $installedConfigVersion -and $installedConfigVersion -ne $TargetConfigVersion) {
+        Write-Log "Config version mismatch (current: $installedConfigVersion, target: $TargetConfigVersion) - restart required" -Level Warning
+        $result.ConfigChanged = $true
+        $result.RequiresRestart = $true
     }
 
-    Write-Log "Agent version $installedAgentVersion and config version $installedConfigVersion are up to date" -Level Success
-    return $false
+    # Check PSK key - requires restart only (case-insensitive comparison for hex strings)
+    if ($null -ne $installedPSKKey -and $installedPSKKey.ToLower() -ne $TargetPSKKey.ToLower()) {
+        Write-Log "PSK key mismatch - restart required" -Level Warning
+        $result.PSKChanged = $true
+        $result.RequiresRestart = $true
+    }
+
+    # Final status summary
+    if (-not $result.RequiresRestart -and -not $result.RequiresReinstall) {
+        Write-Log "Agent version $installedAgentVersion, config version $installedConfigVersion, and PSK key are up to date" -Level Success
+        $result.NoAction = $true
+    } elseif ($result.RequiresRestart -and -not $result.RequiresReinstall) {
+        $changes = @()
+        if ($result.ConfigChanged) { $changes += "configuration" }
+        if ($result.PSKChanged) { $changes += "PSK key" }
+        Write-Log "Update required: $($changes -join ', ') changed" -Level Warning
+    }
+
+    return $result
 }
 
 function Stop-ZabbixService {
@@ -469,7 +570,7 @@ function Test-ServiceHealth {
 #region Main Script
 
 try {
-    Write-Log "=== Zabbix Agent 2 Installation Script ===" -Level Info
+    Write-Log "=== Zabbix Agent 2 Installation Script v$script:ScriptVersion ===" -Level Info
     Write-Log "MSI Filename: $MSIFileName" -Level Info
     Write-Log "Config Version: $ConfigVersion" -Level Info
     Write-Log "Network Share: $NetworkShare" -Level Info
@@ -504,25 +605,15 @@ try {
 
     # Step 3: Check if update is required
     Write-Log "Step 3: Checking if installation/update is required..." -Level Info
-    $updateRequired = Test-UpdateRequired -TargetAgentVersion $targetAgentVersion -TargetConfigVersion $ConfigVersion
+    $updateStatus = Test-UpdateRequired -TargetAgentVersion $targetAgentVersion -TargetConfigVersion $ConfigVersion -TargetPSKKey $PSKKey
 
-    if (-not $updateRequired) {
+    if ($updateStatus.NoAction) {
         Write-Log "No update required - exiting" -Level Success
         exit 0
     }
 
-    # Step 4: Find MSI file in network share
-    Write-Log "Step 4: Locating MSI installer..." -Level Info
-    $msiFile = Get-ChildItem -Path $NetworkShare -Filter $MSIFileName -File -ErrorAction Stop | Select-Object -First 1
-
-    if ($null -eq $msiFile) {
-        throw "MSI file not found in network share: $MSIFileName"
-    }
-
-    Write-Log "Found MSI: $($msiFile.FullName)" -Level Success
-
-    # Step 5: Find configuration file
-    Write-Log "Step 5: Locating configuration file..." -Level Info
+    # Step 4: Find configuration file
+    Write-Log "Step 4: Locating configuration file..." -Level Info
     $configSource = Join-Path $NetworkShare "zabbix_agent2.conf"
 
     if (-not (Test-Path $configSource)) {
@@ -531,36 +622,84 @@ try {
 
     Write-Log "Found config: $configSource" -Level Success
 
-    # Step 6: Stop service if running
-    Write-Log "Step 6: Stopping Zabbix service..." -Level Info
-    Stop-ZabbixService
+    if ($updateStatus.RequiresReinstall) {
+        Write-Log "" -Level Info
+        Write-Log "=== FULL REINSTALLATION MODE ===" -Level Warning
+        Write-Log "" -Level Info
 
-    # Step 7: Install/Update agent
-    Write-Log "Step 7: Installing Zabbix Agent 2..." -Level Info
-    Install-ZabbixAgent -MSIPath $msiFile.FullName -ServerAddress $Server -ServerActiveAddress $ServerActive
+        # Step 5: Find MSI file in network share
+        Write-Log "Step 5: Locating MSI installer..." -Level Info
+        $msiFile = Get-ChildItem -Path $NetworkShare -Filter $MSIFileName -File -ErrorAction Stop | Select-Object -First 1
 
-    # Step 8: Update configuration
-    Write-Log "Step 8: Updating configuration file..." -Level Info
-    Update-ConfigurationFile -SourcePath $configSource
+        if ($null -eq $msiFile) {
+            throw "MSI file not found in network share: $MSIFileName"
+        }
 
-    # Step 9: Create PSK key file
-    Write-Log "Step 9: Creating PSK key file..." -Level Info
-    New-PSKKeyFile -KeyContent $PSKKey
+        Write-Log "Found MSI: $($msiFile.FullName)" -Level Success
 
-    # Step 10: Start service
-    Write-Log "Step 10: Starting Zabbix service..." -Level Info
-    Start-ZabbixService
+        # Step 6: Stop service if running
+        Write-Log "Step 6: Stopping Zabbix service..." -Level Info
+        Stop-ZabbixService
 
-    # Step 11: Verify installation
-    Write-Log "Step 11: Verifying installation..." -Level Info
-    $healthy = Test-ServiceHealth
+        # Step 7: Install/Update agent
+        Write-Log "Step 7: Installing Zabbix Agent 2..." -Level Info
+        Install-ZabbixAgent -MSIPath $msiFile.FullName -ServerAddress $Server -ServerActiveAddress $ServerActive
 
-    if (-not $healthy) {
-        Write-Log "Service health check failed - please review logs" -Level Warning
+        # Step 8: Update configuration
+        Write-Log "Step 8: Updating configuration file..." -Level Info
+        Update-ConfigurationFile -SourcePath $configSource
+
+        # Step 9: Create PSK key file
+        Write-Log "Step 9: Creating PSK key file..." -Level Info
+        New-PSKKeyFile -KeyContent $PSKKey
+
+        # Step 10: Start service
+        Write-Log "Step 10: Starting Zabbix service..." -Level Info
+        Start-ZabbixService
+
+        # Step 11: Verify installation
+        Write-Log "Step 11: Verifying installation..." -Level Info
+        $healthy = Test-ServiceHealth
+
+        if (-not $healthy) {
+            Write-Log "Service health check failed - please review logs" -Level Warning
+        }
+
+        Write-Log "" -Level Info
+        Write-Log "=== Reinstallation completed successfully ===" -Level Success
     }
+    elseif ($updateStatus.RequiresRestart) {
+        Write-Log "" -Level Info
+        Write-Log "=== CONFIGURATION UPDATE MODE ===" -Level Info
+        Write-Log "" -Level Info
 
-    Write-Log "" -Level Info
-    Write-Log "=== Installation completed successfully ===" -Level Success
+        # Step 5: Stop service if running
+        Write-Log "Step 5: Stopping Zabbix service..." -Level Info
+        Stop-ZabbixService
+
+        # Step 6: Update configuration
+        Write-Log "Step 6: Updating configuration file..." -Level Info
+        Update-ConfigurationFile -SourcePath $configSource
+
+        # Step 7: Update PSK key file
+        Write-Log "Step 7: Updating PSK key file..." -Level Info
+        New-PSKKeyFile -KeyContent $PSKKey
+
+        # Step 8: Start service
+        Write-Log "Step 8: Starting Zabbix service..." -Level Info
+        Start-ZabbixService
+
+        # Step 9: Verify service
+        Write-Log "Step 9: Verifying service..." -Level Info
+        $healthy = Test-ServiceHealth
+
+        if (-not $healthy) {
+            Write-Log "Service health check failed - please review logs" -Level Warning
+        }
+
+        Write-Log "" -Level Info
+        Write-Log "=== Configuration update completed successfully ===" -Level Success
+    }
     
     # Get actual installed version
     $finalAgentVersion = Get-InstalledAgentVersion
@@ -586,3 +725,36 @@ finally {
 }
 
 #endregion
+
+# SIG # Begin signature block
+# MIIFlwYJKoZIhvcNAQcCoIIFiDCCBYQCAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
+# gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUdmtARlQUfewReApnDbk3LN1b
+# FxGgggMkMIIDIDCCAgigAwIBAgIQMUa76AXOA5lGACpHHUCExTANBgkqhkiG9w0B
+# AQUFADAoMSYwJAYDVQQDDB1MZXNoa2V2aWNoIEFuZHJldyBDb2RlU2lnbmluZzAe
+# Fw0yNDAyMDYwNzQ5MzVaFw0yNjAyMDYwNzU5MzVaMCgxJjAkBgNVBAMMHUxlc2hr
+# ZXZpY2ggQW5kcmV3IENvZGVTaWduaW5nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A
+# MIIBCgKCAQEAn81rtNn52ihm9ftCieReMsRADe6QI9J0JTLFpYSH0CXGi3unGTM2
+# 6T+/G2OcP3Kvp54aYFWTKoGy4+Ez8BHt7zp2CUBdapCeHHxpj1gafeRFHDoq4LoS
+# 4XIjFx4JPJw6kClAvACgvkZSsg3q9RQ7geTJHwuqvKT2yKZxLUfjXWdCV6+S6nhN
+# Sg7sbAzSly9a3nMKi5ZcX9hG7HUoSIkgOeRo4QJv98DBel3qKlu/peptglMB3oW2
+# FtsO/HIEDfDA/Z2H68O8o3pRX6dmnTpkYS4cCbFZHxxOTWYDq2tv52gEtDYLbp2q
+# DyqXuB/1kl/87cICOpww0l1d7D01wPelLQIDAQABo0YwRDAOBgNVHQ8BAf8EBAMC
+# B4AwEwYDVR0lBAwwCgYIKwYBBQUHAwMwHQYDVR0OBBYEFKhLfnQ4XjFNzGgpc3PW
+# uqOtkoYxMA0GCSqGSIb3DQEBBQUAA4IBAQACQUZglaZPPDC17+5xmViCe+OVs+MM
+# xTIqxVTzJxORVhyVVZrpYJJH1Ir4LFdCAWaH69XIaAvPPWlPFNDVn2P9YYcPiCgh
+# idoRyV8e6nTJnY2SsPHnLP5/ci2o0gKNcyMnhAyttASG31aCWDhT5RJcplbmk6un
+# GcZGxkow1r0tTm1NThUpacRSC9CaOoium7BVZPeFa37hC0RPb/7qMwfEwnXHH/2l
+# KRqTsYN2euJ3VSKoYQLvrJU/Xiu36SBWOIBAle8RkrHE/GOlKnHfPb3qS4yjjU/f
+# 2qI/mRWi9EMw34kJ/0KhuCN94WPIkUsJXnnGkEjibylXmlpabWlvHcFyMYIB3TCC
+# AdkCAQEwPDAoMSYwJAYDVQQDDB1MZXNoa2V2aWNoIEFuZHJldyBDb2RlU2lnbmlu
+# ZwIQMUa76AXOA5lGACpHHUCExTAJBgUrDgMCGgUAoHgwGAYKKwYBBAGCNwIBDDEK
+# MAigAoAAoQKAADAZBgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3
+# AgELMQ4wDAYKKwYBBAGCNwIBFTAjBgkqhkiG9w0BCQQxFgQUYNSu08x0RFR2l2JU
+# dwyQavGMgaQwDQYJKoZIhvcNAQEBBQAEggEAfYJe01QdGixjLqq6ywX+Qkw+i2Zi
+# vuiyObE/rYi1z3yDQK4cA5dge9gVejhdSCsxx/F3vWrukwb46XwHWsnITVDu7rVq
+# nkUDxBYaBHJ0tg5H3ztKtVLsTmeMHpWo7vpCQFvhFSrTvmTHRyF6XaHTMxIaqy+j
+# AR5NKD/6nzzkC3tcFs4tWVLvEDvh8VeMbp0tLhI9r8iy/PDKGw9g4JS28D6PMmt0
+# BCxRu3A7skpCQs0AGp6VBBL0gV8OeRJYiQ63y2f7YTMpehWznSUDeBvFVa+iWWP5
+# HU/gPdHGGygNQ/Go7j+EskcMQcykAylt5iXduNB+Hp1kwtEd0nGQhhc7yw==
+# SIG # End signature block
