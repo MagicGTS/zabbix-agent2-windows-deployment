@@ -52,7 +52,7 @@ This PowerShell script automates the deployment and update management of Zabbix 
 .
 ├── Install-ZabbixAgent2.ps1    # Main installation script
 ├── zabbix_agent2.conf          # Example agent configuration
-├── ZABBIX-README.md            # This file
+├── README.md                   # This file
 └── ZABBIX-AUTO-DISCOVERY.md    # Auto-discovery documentation
 ```
 
@@ -341,3 +341,4 @@ Common causes: Invalid server address, firewall blocking, incorrect PSK
 ---
 
 **⭐ If you find this useful, please star this repository!**
+
